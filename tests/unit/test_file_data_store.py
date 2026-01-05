@@ -158,3 +158,117 @@ def test_read_fundamental_returns_latest(temp_store):
 def test_read_fundamental_missing_returns_none(temp_store):
     result = temp_store.read_fundamental("MISSING")
     assert result is None
+
+
+# =============================================================================
+# Strategy State Tests
+# =============================================================================
+
+def test_save_and_load_strategy_state(temp_store):
+    state = {
+        "positions": {"AAPL": 100, "MSFT": 50},
+        "cash": 10000.0,
+        "last_updated": "2026-01-05T10:00:00"
+    }
+
+    temp_store.save_strategy_state("value_strategy", state)
+
+    result = temp_store.load_strategy_state("value_strategy")
+
+    assert result == state
+
+
+def test_load_strategy_state_missing_returns_none(temp_store):
+    result = temp_store.load_strategy_state("missing_strategy")
+    assert result is None
+
+
+def test_save_strategy_state_overwrites(temp_store):
+    state1 = {"cash": 10000.0}
+    state2 = {"cash": 5000.0}
+
+    temp_store.save_strategy_state("test_strategy", state1)
+    temp_store.save_strategy_state("test_strategy", state2)
+
+    result = temp_store.load_strategy_state("test_strategy")
+    assert result["cash"] == 5000.0
+
+
+# =============================================================================
+# Audit Log Tests
+# =============================================================================
+
+def test_log_decision(temp_store):
+    from src.models import Decision, Action
+
+    decision = Decision(
+        symbol="AAPL",
+        action=Action.BUY,
+        target_weight=0.05,
+        confidence=0.8,
+        reasoning="Strong fundamentals"
+    )
+
+    temp_store.log_decision("value_strategy", decision)
+
+    # Verify file exists and contains the decision
+    log_files = list((temp_store.base_path / "audit" / "decisions").glob("*.jsonl"))
+    assert len(log_files) == 1
+
+    with open(log_files[0]) as f:
+        lines = f.readlines()
+        assert len(lines) == 1
+        import json
+        logged = json.loads(lines[0])
+        assert logged["symbol"] == "AAPL"
+        assert logged["action"] == "buy"
+
+
+def test_log_order(temp_store):
+    from src.models import Order, OrderResult
+
+    order = Order(
+        strategy_name="value_strategy",
+        symbol="AAPL",
+        action="BUY",
+        quantity=100,
+        order_type="MARKET"
+    )
+
+    result = OrderResult(
+        order_id=123,
+        status="filled",
+        fill_price=150.25,
+        fill_quantity=100,
+        message=None
+    )
+
+    temp_store.log_order("value_strategy", order, result)
+
+    log_files = list((temp_store.base_path / "audit" / "orders").glob("*.jsonl"))
+    assert len(log_files) == 1
+
+    with open(log_files[0]) as f:
+        lines = f.readlines()
+        assert len(lines) == 1
+        import json
+        logged = json.loads(lines[0])
+        assert logged["order"]["symbol"] == "AAPL"
+        assert logged["result"]["status"] == "filled"
+
+
+def test_log_multiple_decisions_appends(temp_store):
+    from src.models import Decision, Action
+
+    decision1 = Decision(symbol="AAPL", action=Action.BUY, target_weight=0.05, confidence=0.8, reasoning="Buy")
+    decision2 = Decision(symbol="MSFT", action=Action.HOLD, target_weight=0.0, confidence=0.5, reasoning="Hold")
+
+    temp_store.log_decision("value_strategy", decision1)
+    temp_store.log_decision("value_strategy", decision2)
+
+    log_files = list((temp_store.base_path / "audit" / "decisions").glob("*.jsonl"))
+    assert len(log_files) == 1
+
+    with open(log_files[0]) as f:
+        lines = f.readlines()
+        assert len(lines) == 2

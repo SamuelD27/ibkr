@@ -253,21 +253,73 @@ class FileDataStore:
         raise NotImplementedError("Event storage not yet implemented")
 
     # =========================================================================
-    # Strategy State Storage (JSON) - Not yet implemented
+    # Strategy State Storage (JSON)
     # =========================================================================
 
     def save_strategy_state(self, strategy_name: str, state: dict) -> None:
-        raise NotImplementedError("State storage not yet implemented")
+        """Save strategy state to JSON file."""
+        file_path = self.base_path / "state" / f"{strategy_name}.json"
+        with open(file_path, "w") as f:
+            json.dump(state, f, indent=2)
+        logger.debug(f"Saved strategy state to {file_path}")
 
     def load_strategy_state(self, strategy_name: str) -> dict | None:
-        raise NotImplementedError("State storage not yet implemented")
+        """Load strategy state from JSON file."""
+        file_path = self.base_path / "state" / f"{strategy_name}.json"
+        if not file_path.exists():
+            return None
+        with open(file_path) as f:
+            return json.load(f)
 
     # =========================================================================
-    # Audit Logging (JSONL) - Not yet implemented
+    # Audit Logging (JSONL)
     # =========================================================================
 
     def log_decision(self, strategy_name: str, decision: Decision) -> None:
-        raise NotImplementedError("Audit logging not yet implemented")
+        """Log a strategy decision to JSONL file."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        file_path = self.base_path / "audit" / "decisions" / f"{today}.jsonl"
+
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "strategy": strategy_name,
+            "symbol": decision.symbol,
+            "action": decision.action.value,
+            "target_weight": decision.target_weight,
+            "confidence": decision.confidence,
+            "reasoning": decision.reasoning,
+        }
+
+        with open(file_path, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+
+        logger.debug(f"Logged decision to {file_path}")
 
     def log_order(self, strategy_name: str, order: Order, result: OrderResult) -> None:
-        raise NotImplementedError("Audit logging not yet implemented")
+        """Log an order and its result to JSONL file."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        file_path = self.base_path / "audit" / "orders" / f"{today}.jsonl"
+
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "strategy": strategy_name,
+            "order": {
+                "symbol": order.symbol,
+                "action": order.action,
+                "quantity": order.quantity,
+                "order_type": order.order_type,
+                "limit_price": order.limit_price,
+            },
+            "result": {
+                "order_id": result.order_id,
+                "status": result.status,
+                "fill_price": result.fill_price,
+                "fill_quantity": result.fill_quantity,
+                "message": result.message,
+            },
+        }
+
+        with open(file_path, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+
+        logger.debug(f"Logged order to {file_path}")
