@@ -98,3 +98,63 @@ def test_write_empty_bars_does_nothing(temp_store):
     temp_store.write_bars("AAPL", [])
     result = temp_store.read_bars("AAPL", datetime(2026, 1, 1), datetime(2026, 1, 31))
     assert result == []
+
+
+# =============================================================================
+# Fundamental Data Tests
+# =============================================================================
+
+def test_write_and_read_fundamental(temp_store):
+    from src.models import FundamentalData
+
+    data = FundamentalData(
+        symbol="AAPL",
+        timestamp=datetime(2026, 1, 5, 10, 0, 0),
+        company_name="Apple Inc",
+        cik="0000320193",
+        employees=166000,
+        shares_outstanding=14776353000.0,
+        float_shares=14525947723.0,
+        industry="Technology",
+        category="Computers",
+        subcategory="Consumer Electronics",
+        raw_xml="<test/>"
+    )
+
+    temp_store.write_fundamental("AAPL", data)
+
+    result = temp_store.read_fundamental("AAPL")
+
+    assert result is not None
+    assert result.symbol == "AAPL"
+    assert result.company_name == "Apple Inc"
+    assert result.employees == 166000
+
+
+def test_read_fundamental_returns_latest(temp_store):
+    from src.models import FundamentalData
+
+    old_data = FundamentalData(
+        symbol="AAPL", timestamp=datetime(2026, 1, 1),
+        company_name="Apple Inc", cik="123", employees=160000,
+        shares_outstanding=None, float_shares=None,
+        industry=None, category=None, subcategory=None, raw_xml=""
+    )
+
+    new_data = FundamentalData(
+        symbol="AAPL", timestamp=datetime(2026, 1, 5),
+        company_name="Apple Inc", cik="123", employees=166000,
+        shares_outstanding=None, float_shares=None,
+        industry=None, category=None, subcategory=None, raw_xml=""
+    )
+
+    temp_store.write_fundamental("AAPL", old_data)
+    temp_store.write_fundamental("AAPL", new_data)
+
+    result = temp_store.read_fundamental("AAPL")
+    assert result.employees == 166000
+
+
+def test_read_fundamental_missing_returns_none(temp_store):
+    result = temp_store.read_fundamental("MISSING")
+    assert result is None

@@ -173,14 +173,74 @@ class FileDataStore:
         return bars
 
     # =========================================================================
-    # Fundamental Data Storage (JSON) - Not yet implemented
+    # Fundamental Data Storage (JSON)
     # =========================================================================
 
     def write_fundamental(self, symbol: str, data: FundamentalData) -> None:
-        raise NotImplementedError("Fundamental storage not yet implemented")
+        """Write fundamental data to JSON file, timestamped."""
+        symbol_dir = self.base_path / "fundamentals" / symbol
+        symbol_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use timestamp for filename to support historical queries
+        filename = data.timestamp.strftime("%Y-%m-%d_%H%M%S") + ".json"
+        file_path = symbol_dir / filename
+
+        # Convert to dict for JSON serialization
+        data_dict = {
+            "symbol": data.symbol,
+            "timestamp": data.timestamp.isoformat(),
+            "company_name": data.company_name,
+            "cik": data.cik,
+            "employees": data.employees,
+            "shares_outstanding": data.shares_outstanding,
+            "float_shares": data.float_shares,
+            "industry": data.industry,
+            "category": data.category,
+            "subcategory": data.subcategory,
+            "raw_xml": data.raw_xml,
+        }
+
+        with open(file_path, "w") as f:
+            json.dump(data_dict, f, indent=2)
+
+        logger.debug(f"Wrote fundamental data to {file_path}")
 
     def read_fundamental(self, symbol: str, as_of: datetime | None = None) -> FundamentalData | None:
-        raise NotImplementedError("Fundamental storage not yet implemented")
+        """Read fundamental data from JSON. Returns latest if as_of is None."""
+        symbol_dir = self.base_path / "fundamentals" / symbol
+        if not symbol_dir.exists():
+            return None
+
+        # Get all JSON files
+        json_files = sorted(symbol_dir.glob("*.json"), reverse=True)
+        if not json_files:
+            return None
+
+        # If as_of specified, filter to files before that time
+        if as_of is not None:
+            as_of_str = as_of.strftime("%Y-%m-%d_%H%M%S")
+            json_files = [f for f in json_files if f.stem <= as_of_str]
+            if not json_files:
+                return None
+
+        # Read the latest file
+        latest_file = json_files[0]
+        with open(latest_file) as f:
+            data_dict = json.load(f)
+
+        return FundamentalData(
+            symbol=data_dict["symbol"],
+            timestamp=datetime.fromisoformat(data_dict["timestamp"]),
+            company_name=data_dict["company_name"],
+            cik=data_dict["cik"],
+            employees=data_dict.get("employees"),
+            shares_outstanding=data_dict.get("shares_outstanding"),
+            float_shares=data_dict.get("float_shares"),
+            industry=data_dict.get("industry"),
+            category=data_dict.get("category"),
+            subcategory=data_dict.get("subcategory"),
+            raw_xml=data_dict["raw_xml"],
+        )
 
     # =========================================================================
     # Event Storage (Parquet) - Not yet implemented
