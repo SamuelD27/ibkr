@@ -1,0 +1,26 @@
+# IBKR Trading Bot Configuration
+# Copy this file to config/local.yaml and customize
+
+ibkr:
+  host: "127.0.0.1"
+  port: 7497  # 7497 for TWS paper, 4002 for Gateway paper
+  client_id: 1
+
+data_store:
+  backend: "file"
+  path: "./data"
+
+collector:
+  watchlist:
+    - "AAPL"
+    - "MSFT"
+    - "GOOGL"
+  fundamental_refresh_hours: 24
+
+strategies:
+  - name: "example_value"
+    class_path: "src.strategies.example_value.ExampleValueStrategy"
+    allocated_capital: 10000
+    enabled: true
+    params:
+      min_market_cap: 1000000000  # 1B minimum market cap
