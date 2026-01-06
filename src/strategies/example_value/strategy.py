@@ -71,8 +71,21 @@ class ExampleValueStrategy:
 
         elif event.type == "fundamental_data":
             # Store fundamental data from event payload
-            # In real usage, this would come from the FundamentalData object
-            logger.debug(f"Received fundamental data for {symbol}")
+            payload = event.payload
+            self._fundamentals[symbol] = FundamentalData(
+                symbol=symbol,
+                timestamp=event.timestamp,
+                company_name=payload.get("company_name", ""),
+                cik=payload.get("cik", ""),
+                employees=payload.get("employees"),
+                shares_outstanding=payload.get("shares_outstanding"),
+                float_shares=payload.get("float_shares"),
+                industry=payload.get("industry"),
+                category=payload.get("category"),
+                subcategory=payload.get("subcategory"),
+                raw_xml=payload.get("raw_xml", ""),
+            )
+            logger.debug(f"Stored fundamental data for {symbol}")
 
         # Check if we have all required data to run pipeline
         if symbol not in self._fundamentals or symbol not in self._prices:
