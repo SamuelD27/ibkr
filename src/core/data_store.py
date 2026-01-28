@@ -112,12 +112,19 @@ class FileDataStore:
                 existing_bars = self._read_parquet_bars(file_path)
 
             # Merge and dedupe by date (newer data wins)
-            all_bars = {b.date: b for b in existing_bars}
+            # Normalize dates to date objects (not datetime) for consistent keying
+            def normalize_date(d):
+                """Convert datetime to date for consistent comparison."""
+                if hasattr(d, 'date') and callable(d.date):
+                    return d.date()  # datetime -> date
+                return d  # already a date
+
+            all_bars = {normalize_date(b.date): b for b in existing_bars}
             for bar in month_bars:
-                all_bars[bar.date] = bar
+                all_bars[normalize_date(bar.date)] = bar
 
             # Sort and write
-            sorted_bars = sorted(all_bars.values(), key=lambda b: b.date)
+            sorted_bars = sorted(all_bars.values(), key=lambda b: normalize_date(b.date))
             self._write_parquet_bars(file_path, sorted_bars)
             logger.debug(f"Wrote {len(sorted_bars)} bars to {file_path}")
 
@@ -138,9 +145,19 @@ class FileDataStore:
 
     def _write_parquet_bars(self, path: Path, bars: list[PriceBar]) -> None:
         """Write bars to a Parquet file."""
+        # Convert date objects to datetime for Parquet compatibility
+        def to_date_int(d) -> int:
+            """Convert date/datetime to integer (days since epoch) for Parquet."""
+            if hasattr(d, 'date') and callable(d.date):
+                d = d.date()  # datetime -> date
+            # Convert to days since epoch (1970-01-01)
+            from datetime import date as date_type
+            epoch = date_type(1970, 1, 1)
+            return (d - epoch).days
+
         table = pa.table({
             "symbol": [b.symbol for b in bars],
-            "date": [b.date for b in bars],
+            "date": pa.array([to_date_int(b.date) for b in bars], type=pa.date32()),
             "open": [b.open for b in bars],
             "high": [b.high for b in bars],
             "low": [b.low for b in bars],

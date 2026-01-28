@@ -1,436 +1,648 @@
-# Interactive Brokers TWS API: Complete Python Development Guide
+# Interactive Brokers Client Portal Web API: Complete Python Development Guide
 
-The TWS API enables fully automated trading across all asset classes through a callback-based architecture. This guide covers everything needed to build production-ready trading bots, from connection handling to order management, using either the native `ibapi` library or the more developer-friendly `ib_async` wrapper. **Critical update:** The popular `ib_insync` library was archived in March 2024 and succeeded by `ib_async` under active maintenance.
-
----
-
-## Core architecture: The EWrapper/EClient pattern
-
-The TWS API uses a **request/response pattern** over TCP sockets with two fundamental classes working together. **EClient** handles all outgoing requests to TWS/IB Gateway—placing orders, requesting data, managing subscriptions. **EWrapper** processes all incoming responses through callback methods you override. This separation creates a clean but verbose architecture requiring careful message handling.
-
-```python
-from ibapi.client import EClient
-from ibapi.wrapper import EWrapper
-import threading
-
-class TradingApp(EWrapper, EClient):
-    def __init__(self):
-        EClient.__init__(self, self)  # Pass wrapper reference
-        self.next_order_id = None
-    
-    def nextValidId(self, orderId: int):
-        """Connection fully established when this fires"""
-        self.next_order_id = orderId
-        print(f"Connected - Next Order ID: {orderId}")
-    
-    def error(self, reqId, errorCode, errorString, advancedOrderReject=""):
-        print(f"Error {errorCode}: {errorString}")
-
-app = TradingApp()
-app.connect("127.0.0.1", 7497, clientId=1)
-threading.Thread(target=app.run, daemon=True).start()
-```
-
-The `run()` method blocks indefinitely processing the message queue, so it must execute in a separate thread. Python's implementation uses the standard `Queue` class rather than the EReaderSignal used in other languages. The EReader thread starts automatically upon connection.
-
-### Connection configuration
-
-| Application | Live Port | Paper Port | Best For |
-|-------------|-----------|------------|----------|
-| TWS | 7496 | 7497 | Development, visual confirmation |
-| IB Gateway | 4001 | 4002 | Production, headless servers |
-
-**IB Gateway** consumes approximately 40% less memory than TWS and provides better stability for 24/7 operation. Each connection requires a unique **clientId** (0-32 maximum), with clientId 0 acting as the "master client" receiving updates for all orders. The `nextValidId` callback signals that the connection handshake is complete—never send requests before receiving it.
-
-### Thread-safe reconnection handling
-
-Production systems require robust reconnection logic handling the inevitable disconnections:
-
-```python
-class RobustTradingApp(EWrapper, EClient):
-    def __init__(self):
-        EClient.__init__(self, self)
-        self._connected = threading.Event()
-        self._lock = threading.Lock()
-    
-    def connectionClosed(self):
-        self._connected.clear()
-        self._attempt_reconnect()
-    
-    def error(self, reqId, errorCode, errorString, advancedOrderReject=""):
-        if errorCode == 1100:  # Connectivity lost
-            self._attempt_reconnect()
-        elif errorCode in [1101, 1102]:  # Connectivity restored
-            self._resubscribe_market_data()
-```
-
-Error code **1100** indicates connectivity loss requiring reconnection and data resubscription. Codes **1101** (data lost) and **1102** (data maintained) signal restoration, with 1101 requiring you to resubmit all market data requests.
+The Client Portal Web API enables fully automated trading across all asset classes through a RESTful HTTP interface with WebSocket streaming. This guide covers everything needed to build production-ready trading bots using the Web API gateway.
 
 ---
 
-## Contract specifications across asset classes
+## Core Architecture: Gateway + REST + WebSocket
 
-Every API request requires a properly configured `Contract` object specifying the instrument. The **conId** (contract ID) provides the most precise identification—a permanent, unique integer that never changes.
+The Web API uses a **local gateway** that authenticates with IBKR and provides both REST endpoints and WebSocket streaming. Unlike the TWS API's callback-based architecture, the Web API uses standard HTTP request/response patterns and WebSocket pub/sub.
 
-### Stock contracts
-
-```python
-from ibapi.contract import Contract
-
-# Recommended: SMART routing with primary exchange
-contract = Contract()
-contract.symbol = "AAPL"
-contract.secType = "STK"
-contract.exchange = "SMART"
-contract.currency = "USD"
-contract.primaryExchange = "NASDAQ"  # Prevents ambiguity
-
-# Most precise: Using conId
-contract = Contract()
-contract.conId = 265598  # AAPL's permanent ID
-contract.exchange = "SMART"
+```
+┌─────────────────┐     HTTPS/WSS      ┌──────────────────┐     HTTPS     ┌────────────────┐
+│  Your Python    │ ←────────────────→ │  Client Portal   │ ←───────────→ │  IBKR Servers  │
+│  Application    │   localhost:5000   │  Gateway (Java)  │  api.ibkr.com │                │
+└─────────────────┘                    └──────────────────┘               └────────────────┘
 ```
 
-### Options and futures
+### Key Components
+
+1. **Client Portal Gateway** - Java application running locally, handles authentication
+2. **REST API** - Standard HTTP endpoints for requests/orders/account data
+3. **WebSocket API** - Real-time streaming for market data, orders, P&L
+
+### Basic Connection Flow
 
 ```python
-# Equity option
-contract = Contract()
-contract.symbol = "AAPL"
-contract.secType = "OPT"
-contract.exchange = "SMART"
-contract.currency = "USD"
-contract.lastTradeDateOrContractMonth = "20250321"
-contract.strike = 180.0
-contract.right = "C"  # Call
-contract.multiplier = "100"
+import requests
+import ssl
 
-# E-mini S&P 500 future
-contract = Contract()
-contract.symbol = "ES"
-contract.secType = "FUT"
-contract.exchange = "CME"
-contract.currency = "USD"
-contract.lastTradeDateOrContractMonth = "202509"
+# Disable SSL warnings for self-signed cert (dev only)
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Forex pair
-contract = Contract()
-contract.symbol = "EUR"
-contract.secType = "CASH"
-contract.exchange = "IDEALPRO"
-contract.currency = "USD"
-```
+BASE_URL = "https://localhost:5000/v1/api"
 
-The `reqContractDetails()` method validates contracts and returns complete specifications including trading hours, tick sizes, and valid exchanges. When multiple matches exist (common with options), use the returned conId for subsequent requests.
+def check_auth():
+    """Check if gateway session is authenticated."""
+    response = requests.get(
+        f"{BASE_URL}/iserver/auth/status",
+        verify=False
+    )
+    data = response.json()
+    return data.get("authenticated", False)
 
----
-
-## Order management and execution
-
-### Order types and construction
-
-| Order Type | `orderType` Value | Key Fields |
-|------------|-------------------|------------|
-| Market | `"MKT"` | action, totalQuantity |
-| Limit | `"LMT"` | lmtPrice |
-| Stop | `"STP"` | auxPrice (trigger) |
-| Stop-Limit | `"STP LMT"` | auxPrice, lmtPrice |
-| Trailing Stop | `"TRAIL"` | auxPrice or trailingPercent |
-
-```python
-from ibapi.order import Order
-
-order = Order()
-order.action = "BUY"
-order.orderType = "LMT"
-order.totalQuantity = 100
-order.lmtPrice = 150.00
-order.tif = "GTC"  # Good-til-cancelled
-```
-
-### Bracket orders with take-profit and stop-loss
-
-Bracket orders link three orders together: entry, take-profit, and stop-loss. The critical detail is setting `transmit = False` on all orders except the final child:
-
-```python
-def create_bracket_order(parent_id, action, qty, entry, tp_price, sl_price):
-    parent = Order()
-    parent.orderId = parent_id
-    parent.action = action
-    parent.orderType = "LMT"
-    parent.totalQuantity = qty
-    parent.lmtPrice = entry
-    parent.transmit = False  # Hold until all orders ready
-    
-    take_profit = Order()
-    take_profit.orderId = parent_id + 1
-    take_profit.action = "SELL" if action == "BUY" else "BUY"
-    take_profit.orderType = "LMT"
-    take_profit.totalQuantity = qty
-    take_profit.lmtPrice = tp_price
-    take_profit.parentId = parent_id
-    take_profit.transmit = False
-    
-    stop_loss = Order()
-    stop_loss.orderId = parent_id + 2
-    stop_loss.action = "SELL" if action == "BUY" else "BUY"
-    stop_loss.orderType = "STP"
-    stop_loss.auxPrice = sl_price
-    stop_loss.totalQuantity = qty
-    stop_loss.parentId = parent_id
-    stop_loss.transmit = True  # Transmits entire bracket
-    
-    return [parent, take_profit, stop_loss]
-```
-
-### Order status flow
-
-Orders progress through states: `ApiPending` → `PendingSubmit` → `PreSubmitted` → `Submitted` → `Filled`. The `orderStatus` callback delivers updates:
-
-```python
-def orderStatus(self, orderId, status, filled, remaining, avgFillPrice, 
-                permId, parentId, lastFillPrice, clientId, whyHeld, mktCapPrice):
-    print(f"Order {orderId}: {status}, Filled: {filled}/{filled + remaining}")
-```
-
-Modify orders by calling `placeOrder()` with the same orderId. Cancel with `cancelOrder(orderId)` or `reqGlobalCancel()` for all open orders.
-
----
-
-## Real-time market data streaming
-
-### Level 1 quotes with reqMktData
-
-```python
-# Streaming quotes with generic ticks for RTVolume and shortable status
-self.reqMktData(1001, contract, "233,236", False, False, [])
-
-# Callbacks receive price, size, and string data
-def tickPrice(self, reqId, tickType, price, attrib):
-    # tickType: 1=BID, 2=ASK, 4=LAST, 6=HIGH, 7=LOW
-    pass
-
-def tickSize(self, reqId, tickType, size):
-    # tickType: 0=BID_SIZE, 3=ASK_SIZE, 5=LAST_SIZE, 8=VOLUME
-    pass
-```
-
-**Important limitation:** Data arrives as aggregated snapshots approximately every 250ms, not true tick-by-tick. For actual tick data, use `reqTickByTickData()`, though subscriptions are limited to 5% of your market data lines.
-
-### Market data subscription limits
-
-Default allocation provides **100 concurrent streaming subscriptions**. The formula for your actual limit: `Max(100, Monthly Commissions ÷ 8, Equity × 100 ÷ $1,000,000)`. Quote Booster packs add 100 lines each ($30/month) up to 10 packs maximum.
-
----
-
-## Historical data retrieval and pacing
-
-### Request parameters
-
-```python
-self.reqHistoricalData(
-    reqId=4001,
-    contract=contract,
-    endDateTime="",  # Empty = now
-    durationStr="30 D",
-    barSizeSetting="1 hour",
-    whatToShow="TRADES",  # Also: MIDPOINT, BID, ASK, ADJUSTED_LAST
-    useRTH=1,  # Regular trading hours only
-    formatDate=1,
-    keepUpToDate=False,
-    chartOptions=[]
-)
-```
-
-Valid bar sizes range from `"1 secs"` through `"1 month"`. Duration strings use format like `"30 D"`, `"4 W"`, `"6 M"`, or `"1 Y"` (maximum). Each request returns approximately **2000 bars maximum**.
-
-### Avoiding pacing violations
-
-Historical data requests face strict rate limits that cause the dreaded "pacing violation" error:
-
-- No identical requests within **15 seconds**
-- Maximum **6 requests** for same contract/exchange within **2 seconds**  
-- Maximum **60 requests** per **10-minute** window
-- **BID_ASK requests count as two** requests
-- Maximum **50 simultaneous** open requests
-
-```python
-class HistoricalDataPacer:
-    def __init__(self):
-        self.request_times = []
-        self.lock = threading.Lock()
-    
-    def wait_if_needed(self):
-        with self.lock:
-            now = time.time()
-            # Clean requests older than 10 minutes
-            self.request_times = [t for t in self.request_times if now - t < 600]
-            
-            # Enforce 60-per-10-minute limit
-            if len(self.request_times) >= 55:
-                sleep_time = 600 - (now - self.request_times[0])
-                time.sleep(max(0, sleep_time) + 1)
-            
-            self.request_times.append(time.time())
+# Authentication requires browser login to https://localhost:5000
+# After login, the gateway maintains the session
 ```
 
 ---
 
-## Account and position management
+## Gateway Setup and Configuration
 
-### Real-time account updates
-
-```python
-# Subscribe to account updates (updates every 3 minutes if changed)
-self.reqAccountUpdates(subscribe=True, acctCode="U1234567")
-
-def updateAccountValue(self, key, val, currency, accountName):
-    # Key values: NetLiquidation, TotalCashValue, BuyingPower, 
-    # UnrealizedPnL, InitMarginReq, MaintMarginReq, AvailableFunds
-    pass
-
-def updatePortfolio(self, contract, position, marketPrice, marketValue,
-                    averageCost, unrealizedPNL, realizedPNL, accountName):
-    pass
-```
-
-### Position tracking
-
-```python
-self.reqPositions()  # Request all positions across accounts
-
-def position(self, account, contract, position, avgCost):
-    print(f"{contract.symbol}: {position} shares @ ${avgCost:.2f}")
-
-def positionEnd(self):
-    print("Initial position snapshot complete")
-```
-
-### Real-time P&L streaming
-
-```python
-self.reqPnL(reqId=17001, account="U1234567", modelCode="")
-
-def pnl(self, reqId, dailyPnL, unrealizedPnL, realizedPnL):
-    # Updates approximately every second
-    print(f"Daily: ${dailyPnL:.2f}, Unrealized: ${unrealizedPnL:.2f}")
-```
-
----
-
-## Python library choice: Native ibapi vs ib_async
-
-### Critical update on ib_insync
-
-The widely-used `ib_insync` library was **archived on March 14, 2024** following the passing of its creator Ewald de Wit. The community has forked and actively maintains it as **ib_async** under the ib-api-reloaded organization, with version 2.0.1 released in June 2025.
-
-### Native ibapi (Official)
-
-- **Installation:** Download from interactivebrokers.github.io (NOT available via pip)
-- **Python requirement:** 3.11.0 minimum
-- **Architecture:** Callback-based requiring explicit threading
-- **Best for:** Institutional requirements, official support needs
-
-### ib_async (Recommended for most use cases)
+### Starting the Gateway
 
 ```bash
-pip install ib_async
+cd clientportal.gw
+bin/run.sh root/conf.yaml
 ```
+
+Output when ready: `Server listening on port 5000`
+
+### Configuration Options (`root/conf.yaml`)
+
+```yaml
+# Network settings
+listenPort: 5000          # Gateway port
+listenSsl: true           # Use HTTPS (recommended)
+sslCert: "vertx.jks"      # SSL certificate
+sslPwd: "mywebapi"        # Certificate password
+
+# IBKR connection
+proxyRemoteHost: "https://api.ibkr.com"
+proxyRemoteSsl: true
+
+# CORS (for web frontends)
+cors:
+    origin.allowed: "*"
+    allowCredentials: false
+
+# IP whitelist
+ips:
+  allow:
+    - 127.0.0.1
+    - 192.*
+  deny:
+    - 212.90.324.10
+```
+
+### Authentication Process
+
+1. Start gateway: `bin/run.sh root/conf.yaml`
+2. Open browser: `https://localhost:5000`
+3. Login with IBKR credentials
+4. Wait for "Client login succeeds" message
+5. Close browser - gateway maintains session
+
+**Session Duration:** ~24 hours of inactivity before expiration
+
+---
+
+## Contract Identification
+
+Every instrument has a unique **conId** (contract ID) that's permanent and never changes. Always resolve symbols to conIds before trading.
+
+### Symbol Search
 
 ```python
-from ib_async import IB, Stock, LimitOrder
+def search_contract(symbol: str) -> list[dict]:
+    """Search for contracts by symbol."""
+    response = requests.post(
+        f"{BASE_URL}/iserver/secdef/search",
+        json={"symbol": symbol},
+        verify=False
+    )
+    return response.json()
 
-ib = IB()
-ib.connect('127.0.0.1', 7497, clientId=1)
-
-# Synchronous-style code (async handled internally)
-contract = Stock('AAPL', 'SMART', 'USD')
-bars = ib.reqHistoricalData(contract, endDateTime='', 
-                            durationStr='30 D', barSizeSetting='1 day',
-                            whatToShow='TRADES', useRTH=True)
-
-order = LimitOrder('BUY', 100, 150.00)
-trade = ib.placeOrder(contract, order)
-ib.sleep(2)  # Process events while waiting
-
-ib.disconnect()
+# Example: AAPL
+contracts = search_contract("AAPL")
+# Returns: [{"conid": 265598, "companyName": "APPLE INC", ...}]
 ```
 
-**Key advantages:** Linear synchronous-style programming, excellent Jupyter support, built-in reconnection logic, cleaner API. Implements the IBKR binary protocol directly—does not require the ibapi package.
+### Contract Types
 
----
+| Type | Description | Example |
+|------|-------------|---------|
+| STK | Stock | AAPL, MSFT |
+| OPT | Option | AAPL calls/puts |
+| FUT | Future | ES, NQ |
+| CASH | Forex | EUR.USD |
+| CRYPTO | Cryptocurrency | BTC |
 
-## Production deployment considerations
-
-### IB Gateway for 24/7 operation
-
-Use IB Gateway rather than TWS for production bots. Configure with **IBC (IB Controller)** for headless operation and automatic restarts. Key settings:
-
-- Memory allocation: **4096 MB minimum**
-- Enable "ActiveX and Socket Clients"
-- Enable "Download open orders on connection"
-- Restrict to localhost connections for security
-
-### Error handling priorities
-
-| Code | Meaning | Action Required |
-|------|---------|-----------------|
-| 1100 | Connectivity lost | Reconnect, resubscribe data |
-| 1101 | Restored (data lost) | Resubmit all data requests |
-| 100 | Rate limit exceeded | Implement pacing; 3 violations = disconnect |
-| 200 | Contract not found | Check contract parameters |
-| 201 | Order rejected | Review order parameters, permissions |
-| 354 | No market data subscription | Subscribe or use delayed data |
-
-### Rate limiting implementation
-
-The API enforces **50 messages per second** maximum. Implement a pacer:
+### Get Contract Details
 
 ```python
-from collections import deque
-import time
-
-class RequestPacer:
-    def __init__(self, max_per_second=45):
-        self.timestamps = deque()
-        self.max_per_second = max_per_second
-    
-    def throttle(self):
-        now = time.time()
-        # Remove timestamps older than 1 second
-        while self.timestamps and self.timestamps[0] < now - 1:
-            self.timestamps.popleft()
-        
-        if len(self.timestamps) >= self.max_per_second:
-            time.sleep(0.05)
-        
-        self.timestamps.append(time.time())
+def get_contract_info(conid: int) -> dict:
+    """Get detailed contract information."""
+    response = requests.get(
+        f"{BASE_URL}/iserver/contract/{conid}/info",
+        verify=False
+    )
+    return response.json()
 ```
 
 ---
 
-## Recent API changes (2024-2025)
+## Market Data
 
-**TWS API 10.33 (December 2024):**
-- `EWrapper.error()` now includes `errorTime` parameter with epoch timestamp
-- All "commissions" fields renamed to "commissionAndFees"
-- `cancelOrder()` second argument changed from string to `OrderCancel` object
+### REST Snapshots
 
-**TWS API 10.34.01 (February 2025):**
-- New `EClient.reqCurrentTimeInMillis()` for millisecond-precision timestamps
-- Added `Submitter` field in Order and Execution objects
+```python
+def get_market_snapshot(conids: list[int], fields: list[str] = None) -> dict:
+    """Get market data snapshot for multiple contracts."""
+    params = {"conids": ",".join(str(c) for c in conids)}
+    if fields:
+        params["fields"] = ",".join(fields)
 
-**March 2025 requirement:** Minimum supported TWS/IB Gateway version is **10.30**. Older versions will be blocked from connecting.
+    response = requests.get(
+        f"{BASE_URL}/iserver/marketdata/snapshot",
+        params=params,
+        verify=False
+    )
+    return response.json()
 
-**Deprecated and removed:** `EtradeOnly`, `firmQuoteOnly`, and `nbboPriceCap` order attributes were removed in TWS 983+.
+# Common fields
+# 31: Last price, 83: Change %, 84: Bid, 86: Ask, 88: Volume
+snapshot = get_market_snapshot([265598], ["31", "84", "86", "88"])
+```
+
+### Historical Data
+
+```python
+def get_historical_data(
+    conid: int,
+    period: str = "1d",
+    bar: str = "1min",
+    outside_rth: bool = False
+) -> dict:
+    """Get historical price bars.
+
+    Args:
+        conid: Contract ID
+        period: Duration (1d, 1w, 1m, 3m, 6m, 1y, 2y, 3y, 5y)
+        bar: Bar size (1min, 2min, 5min, 15min, 30min, 1h, 2h, 4h, 1d, 1w, 1m)
+        outside_rth: Include outside regular trading hours
+    """
+    response = requests.get(
+        f"{BASE_URL}/iserver/marketdata/history",
+        params={
+            "conid": conid,
+            "period": period,
+            "bar": bar,
+            "outsideRth": str(outside_rth).lower()
+        },
+        verify=False
+    )
+    return response.json()
+
+# Example
+bars = get_historical_data(265598, period="5d", bar="1h")
+for bar in bars.get("data", []):
+    print(f"Time: {bar['t']}, O: {bar['o']}, H: {bar['h']}, L: {bar['l']}, C: {bar['c']}, V: {bar['v']}")
+```
+
+### WebSocket Streaming
+
+For real-time data, use WebSocket instead of polling REST endpoints.
+
+```python
+import asyncio
+import websockets
+import json
+
+async def stream_market_data(conids: list[int], fields: list[str]):
+    """Stream real-time market data via WebSocket."""
+    uri = "wss://localhost:5000/v1/api/ws"
+
+    async with websockets.connect(uri, ssl=ssl.SSLContext()) as ws:
+        # Subscribe to market data for each contract
+        for conid in conids:
+            message = f'smd+{conid}+{json.dumps({"fields": fields})}'
+            await ws.send(message)
+
+        # Start heartbeat task
+        async def heartbeat():
+            while True:
+                await asyncio.sleep(55)
+                await ws.send("ech+hb")
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+
+        try:
+            async for message in ws:
+                data = json.loads(message)
+                print(f"Received: {data}")
+        finally:
+            heartbeat_task.cancel()
+
+# Subscribe to AAPL (265598) with last price and volume
+# asyncio.run(stream_market_data([265598], ["31", "88"]))
+```
+
+### Market Data Fields Reference
+
+| Field | Description |
+|-------|-------------|
+| 31 | Last price |
+| 83 | Change % |
+| 84 | Bid price |
+| 85 | Ask size |
+| 86 | Ask price |
+| 87 | Bid size |
+| 88 | Volume |
+| 7295 | Open |
+| 7296 | High |
+| 7297 | Low |
+| 7331 | Prior close |
 
 ---
 
-## Conclusion
+## Order Management
 
-Building robust TWS API trading bots requires mastering the callback architecture, implementing proper pacing to avoid rate limits, and choosing the right Python library for your use case. **ib_async provides the smoothest development experience** for most scenarios, while the native ibapi offers official support for institutional requirements. 
+### Account Selection
 
-Key success factors: always wait for `nextValidId` before sending requests, use conId for precise contract identification, implement reconnection logic with data resubscription, and respect the historical data pacing rules. Paper trading on port 7497 provides a safe environment for testing before deploying to production with IB Gateway.
+```python
+def get_accounts() -> list[dict]:
+    """Get list of accounts."""
+    response = requests.get(
+        f"{BASE_URL}/portfolio/accounts",
+        verify=False
+    )
+    return response.json()
+
+accounts = get_accounts()
+account_id = accounts[0]["accountId"]  # e.g., "DU1234567"
+```
+
+### Placing Orders
+
+```python
+def place_order(
+    account_id: str,
+    conid: int,
+    side: str,
+    quantity: int,
+    order_type: str = "MKT",
+    price: float = None,
+    tif: str = "DAY"
+) -> dict:
+    """Place an order.
+
+    Args:
+        account_id: IBKR account ID
+        conid: Contract ID
+        side: "BUY" or "SELL"
+        quantity: Number of shares/contracts
+        order_type: "MKT", "LMT", "STP", "STP_LIMIT"
+        price: Limit price (required for LMT orders)
+        tif: Time in force ("DAY", "GTC", "IOC", "OPG")
+    """
+    order = {
+        "acctId": account_id,
+        "conid": conid,
+        "side": side,
+        "quantity": quantity,
+        "orderType": order_type,
+        "tif": tif
+    }
+
+    if price and order_type in ["LMT", "STP_LIMIT"]:
+        order["price"] = price
+
+    response = requests.post(
+        f"{BASE_URL}/iserver/account/orders",
+        json={"orders": [order]},
+        verify=False
+    )
+    return response.json()
+```
+
+### Order Confirmation Flow
+
+Orders may require confirmation. Handle the reply flow:
+
+```python
+def confirm_order(reply_id: str, confirmed: bool = True) -> dict:
+    """Confirm or reject an order that requires confirmation."""
+    response = requests.post(
+        f"{BASE_URL}/iserver/reply/{reply_id}",
+        json={"confirmed": confirmed},
+        verify=False
+    )
+    return response.json()
+
+# Example order flow
+result = place_order("DU1234567", 265598, "BUY", 100, "LMT", 150.00)
+
+# Check if confirmation needed
+if result.get("id"):
+    # Order placed successfully
+    order_id = result["id"]
+elif result.get("replyId"):
+    # Confirmation required
+    confirm_result = confirm_order(result["replyId"])
+```
+
+### Get Orders
+
+```python
+def get_live_orders() -> dict:
+    """Get all live orders."""
+    response = requests.get(
+        f"{BASE_URL}/iserver/account/orders",
+        verify=False
+    )
+    return response.json()
+
+def get_order_status(order_id: str) -> dict:
+    """Get status of a specific order."""
+    response = requests.get(
+        f"{BASE_URL}/iserver/account/order/status/{order_id}",
+        verify=False
+    )
+    return response.json()
+```
+
+### Cancel Orders
+
+```python
+def cancel_order(account_id: str, order_id: str) -> dict:
+    """Cancel an order."""
+    response = requests.delete(
+        f"{BASE_URL}/iserver/account/{account_id}/order/{order_id}",
+        verify=False
+    )
+    return response.json()
+```
+
+### Modify Orders
+
+```python
+def modify_order(
+    account_id: str,
+    order_id: str,
+    conid: int,
+    quantity: int,
+    price: float
+) -> dict:
+    """Modify an existing order."""
+    response = requests.post(
+        f"{BASE_URL}/iserver/account/{account_id}/order/{order_id}",
+        json={
+            "conid": conid,
+            "quantity": quantity,
+            "price": price
+        },
+        verify=False
+    )
+    return response.json()
+```
+
+### Order Types
+
+| Order Type | `orderType` Value | Required Fields |
+|------------|-------------------|-----------------|
+| Market | `"MKT"` | side, quantity |
+| Limit | `"LMT"` | side, quantity, price |
+| Stop | `"STP"` | side, quantity, auxPrice |
+| Stop-Limit | `"STP_LIMIT"` | side, quantity, price, auxPrice |
 
 ---
 
+## Account and Portfolio
+
+### Account Summary
+
+```python
+def get_account_summary(account_id: str) -> dict:
+    """Get account summary with balances."""
+    response = requests.get(
+        f"{BASE_URL}/portfolio/{account_id}/summary",
+        verify=False
+    )
+    return response.json()
+```
+
+### Positions
+
+```python
+def get_positions(account_id: str) -> list[dict]:
+    """Get all positions for an account."""
+    response = requests.get(
+        f"{BASE_URL}/portfolio/{account_id}/positions/0",
+        verify=False
+    )
+    return response.json()
+```
+
+### P&L Streaming (WebSocket)
+
+```python
+async def stream_pnl():
+    """Stream real-time P&L updates."""
+    uri = "wss://localhost:5000/v1/api/ws"
+
+    async with websockets.connect(uri, ssl=ssl.SSLContext()) as ws:
+        await ws.send("spl+{}")  # Subscribe to P&L
+
+        async for message in ws:
+            data = json.loads(message)
+            if data.get("topic") == "spl":
+                pnl = data.get("args", {})
+                print(f"Daily P&L: {pnl.get('dpl')}, Unrealized: {pnl.get('upl')}")
+```
+
+---
+
+## WebSocket Topics Reference
+
+### Solicited (Request/Subscribe)
+
+| Topic | Format | Description |
+|-------|--------|-------------|
+| `smd` | `smd+{conid}+{"fields":[...]}` | Subscribe market data |
+| `umd` | `umd+{conid}+{}` | Unsubscribe market data |
+| `sor` | `sor+{}` | Subscribe live orders |
+| `uor` | `uor+{}` | Unsubscribe orders |
+| `spl` | `spl+{}` | Subscribe P&L |
+| `upl` | `upl+{}` | Unsubscribe P&L |
+| `ech` | `ech+hb` | Heartbeat (send every 60s) |
+
+### Unsolicited (Received)
+
+| Topic | Description |
+|-------|-------------|
+| `system` | Connection status, periodic heartbeat |
+| `sts` | Authentication status |
+| `ntf` | Notifications (trading info) |
+| `blt` | Bulletins (urgent messages) |
+
+---
+
+## Session Management
+
+### Check Authentication
+
+```python
+def check_auth_status() -> dict:
+    """Check current authentication status."""
+    response = requests.get(
+        f"{BASE_URL}/iserver/auth/status",
+        verify=False
+    )
+    return response.json()
+    # Returns: {"authenticated": true, "competing": false, ...}
+```
+
+### Keep Session Alive
+
+```python
+def tickle() -> dict:
+    """Keep session alive / refresh authentication."""
+    response = requests.post(
+        f"{BASE_URL}/tickle",
+        verify=False
+    )
+    return response.json()
+```
+
+### Reauthenticate
+
+```python
+def reauthenticate() -> dict:
+    """Attempt to reauthenticate session."""
+    response = requests.post(
+        f"{BASE_URL}/iserver/reauthenticate",
+        verify=False
+    )
+    return response.json()
+    # May require browser re-login if session expired
+```
+
+---
+
+## Error Handling
+
+### HTTP Status Codes
+
+| Code | Meaning | Action |
+|------|---------|--------|
+| 200 | Success | Process response |
+| 400 | Bad request | Check parameters |
+| 401 | Not authenticated | Login via browser |
+| 500 | Server error | Check request format |
+
+### Common Issues
+
+1. **"Not authenticated"** - Session expired, need browser login
+2. **SSL Certificate errors** - Use `verify=False` for dev or add gateway cert
+3. **Empty response** - Market may be closed or contract invalid
+4. **Order rejected** - Check account permissions, buying power
+
+---
+
+## Production Deployment
+
+### Security Recommendations
+
+1. **Use proper SSL certificates** in production (not self-signed)
+2. **Restrict gateway IP whitelist** to only your application servers
+3. **Implement session monitoring** with `/iserver/auth/status`
+4. **Use environment variables** for configuration, not hardcoded values
+
+### High Availability
+
+```python
+class WebAPIClient:
+    """Production-ready Web API client with session management."""
+
+    def __init__(self, base_url: str = "https://localhost:5000/v1/api"):
+        self.base_url = base_url
+        self.session = requests.Session()
+        self.session.verify = False  # Configure properly in production
+
+    def ensure_authenticated(self) -> bool:
+        """Check and attempt to restore authentication."""
+        status = self.check_auth()
+        if status.get("authenticated"):
+            return True
+
+        # Try tickle to refresh
+        self.session.post(f"{self.base_url}/tickle")
+
+        # Recheck
+        status = self.check_auth()
+        if status.get("authenticated"):
+            return True
+
+        # Session truly expired - need manual re-login
+        raise RuntimeError("Session expired - browser login required")
+
+    def check_auth(self) -> dict:
+        return self.session.get(f"{self.base_url}/iserver/auth/status").json()
+```
+
+### Monitoring
+
+- Check `/iserver/auth/status` every 5-10 minutes
+- Monitor WebSocket connection with heartbeats
+- Log all order submissions and confirmations
+- Alert on authentication failures
+
+---
+
+## Comparison: Web API vs TWS API
+
+| Feature | Web API | TWS API |
+|---------|---------|---------|
+| Protocol | REST + WebSocket | TCP Socket |
+| Authentication | Browser login | TWS/Gateway GUI |
+| Data Format | JSON | Binary/Callback |
+| Libraries | requests, websockets | ibapi, ib_async |
+| Setup | Java gateway | TWS or IB Gateway |
+| Complexity | Lower | Higher |
+| Rate Limits | Less documented | Well documented |
+| Historical Data | Simpler | More options |
+
+**When to use Web API:**
+- Simpler integration requirements
+- JSON/REST experience
+- Web-based applications
+- Lower latency requirements
+
+**When to use TWS API:**
+- Complex order types
+- High-frequency needs
+- Full API feature access
+- Established codebase
+
+---
+
+## Quick Reference
+
+### Essential Endpoints
+
+```
+GET  /iserver/auth/status          - Check authentication
+POST /iserver/secdef/search        - Search contracts
+GET  /iserver/marketdata/snapshot  - Market data snapshot
+GET  /iserver/marketdata/history   - Historical data
+POST /iserver/account/orders       - Place orders
+GET  /iserver/account/orders       - Get live orders
+DELETE /iserver/account/{acct}/order/{id} - Cancel order
+GET  /portfolio/accounts           - List accounts
+GET  /portfolio/{acct}/positions/0 - Get positions
+POST /tickle                       - Keep session alive
+```
+
+### WebSocket Quick Start
+
+```python
+# Connect: wss://localhost:5000/v1/api/ws
+# Subscribe to AAPL market data:
+ws.send('smd+265598+{"fields":["31","84","86","88"]}')
+# Subscribe to orders:
+ws.send('sor+{}')
+# Heartbeat every 60s:
+ws.send('ech+hb')
+```

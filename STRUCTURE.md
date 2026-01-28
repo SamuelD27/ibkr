@@ -2,7 +2,7 @@
 
 ## Overview
 
-An event-driven algorithmic trading system built for Interactive Brokers TWS/Gateway. The architecture follows a modular design with clear separation between data collection, strategy execution, and order management.
+An event-driven algorithmic trading system built for Interactive Brokers Client Portal Web API. The architecture follows a modular design with clear separation between data collection, strategy execution, and order management.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -104,9 +104,9 @@ YAML-based configuration with dataclass validation:
 
 ```yaml
 ibkr:
-  host: "127.0.0.1"
-  port: 7497
-  client_id: 1
+  gateway_url: "https://localhost:5000/v1/api"
+  websocket_url: "wss://localhost:5000/v1/api/ws"
+  verify_ssl: false  # Set true with proper certs in production
 
 strategies:
   - name: "my_strategy"
@@ -121,11 +121,11 @@ strategies:
 
 ### IBKR Connection (`src/collectors/ibkr/connection.py`)
 
-Manages TWS/Gateway connection:
+Manages Client Portal Web API connection:
 
 ```python
-connection = IBKRConnection(host="127.0.0.1", port=7497, client_id=1)
-order_id = connection.next_order_id  # Auto-incrementing
+connection = IBKRConnection(base_url="https://localhost:5000/v1/api")
+# REST + WebSocket based communication
 ```
 
 ### IBKR Collector (`src/collectors/ibkr/collector.py`)
@@ -226,7 +226,11 @@ pip install -r requirements.txt
 # Run tests
 pytest tests/ -v
 
-# Run with paper trading (TWS on port 7497)
+# Start Client Portal Gateway first
+cd clientportal.gw && bin/run.sh root/conf.yaml
+# Login via browser at https://localhost:5000
+
+# Run the trading bot
 python -m src --config config/default.yaml
 ```
 

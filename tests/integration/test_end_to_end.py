@@ -20,7 +20,7 @@ def create_test_config(tmpdir: str) -> Config:
     return Config(
         ibkr=IBKRConfig(host="127.0.0.1", port=7497, client_id=1),
         data_store=DataStoreConfig(backend="file", path=tmpdir),
-        collector=CollectorConfig(watchlist=["AAPL", "MSFT"], fundamental_refresh_hours=24),
+        collector=CollectorConfig(market_symbol="SPY", scan_interval_hours=24, fundamental_refresh_hours=24),
         strategies=[
             StrategyConfig(
                 name="example_value",

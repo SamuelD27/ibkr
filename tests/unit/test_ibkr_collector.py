@@ -1,5 +1,5 @@
 """Tests for IBKR Collector."""
-from unittest.mock import Mock, MagicMock, AsyncMock
+from unittest.mock import Mock, MagicMock, AsyncMock, patch
 from datetime import datetime
 import pytest
 
@@ -11,6 +11,7 @@ def mock_connection():
 
     conn = Mock(spec=IBKRConnection)
     conn.is_connected.return_value = True
+    conn.ib = Mock()
     return conn
 
 
@@ -35,19 +36,19 @@ def mock_data_store():
 def test_collector_init(mock_connection, mock_event_bus, mock_data_store):
     from src.collectors.ibkr.collector import IBKRCollector
 
-    watchlist = ["AAPL", "MSFT", "GOOGL"]
-
     collector = IBKRCollector(
         connection=mock_connection,
         event_bus=mock_event_bus,
         data_store=mock_data_store,
-        watchlist=watchlist,
+        market_symbol="SPY",
+        scan_interval_hours=24.0,
     )
 
     assert collector.connection is mock_connection
     assert collector.event_bus is mock_event_bus
     assert collector.data_store is mock_data_store
-    assert collector.watchlist == watchlist
+    assert collector.market_symbol == "SPY"
+    assert collector.scan_interval_hours == 24.0
 
 
 def test_collector_is_running(mock_connection, mock_event_bus, mock_data_store):
@@ -57,7 +58,6 @@ def test_collector_is_running(mock_connection, mock_event_bus, mock_data_store):
         connection=mock_connection,
         event_bus=mock_event_bus,
         data_store=mock_data_store,
-        watchlist=["AAPL"],
     )
 
     assert not collector.is_running
@@ -70,7 +70,6 @@ def test_collector_stop(mock_connection, mock_event_bus, mock_data_store):
         connection=mock_connection,
         event_bus=mock_event_bus,
         data_store=mock_data_store,
-        watchlist=["AAPL"],
     )
 
     collector._running = True
@@ -79,7 +78,7 @@ def test_collector_stop(mock_connection, mock_event_bus, mock_data_store):
     assert not collector.is_running
 
 
-def test_on_price_bar_publishes_event(mock_connection, mock_event_bus, mock_data_store):
+def test_collector_publish_price_bars(mock_connection, mock_event_bus, mock_data_store):
     from src.collectors.ibkr.collector import IBKRCollector
     from src.models import PriceBar
 
@@ -87,20 +86,21 @@ def test_on_price_bar_publishes_event(mock_connection, mock_event_bus, mock_data
         connection=mock_connection,
         event_bus=mock_event_bus,
         data_store=mock_data_store,
-        watchlist=["AAPL"],
     )
 
-    bar = PriceBar(
-        symbol="AAPL",
-        date=datetime(2026, 1, 5),
-        open=150.0,
-        high=152.0,
-        low=149.0,
-        close=151.0,
-        volume=1000000,
-    )
+    bars = [
+        PriceBar(
+            symbol="AAPL",
+            date=datetime(2026, 1, 5),
+            open=150.0,
+            high=152.0,
+            low=149.0,
+            close=151.0,
+            volume=1000000,
+        )
+    ]
 
-    collector._on_price_bar(bar)
+    collector._publish_price_bars("AAPL", bars)
 
     mock_event_bus.publish.assert_called_once()
     event = mock_event_bus.publish.call_args[0][0]
@@ -109,7 +109,7 @@ def test_on_price_bar_publishes_event(mock_connection, mock_event_bus, mock_data
     assert event.source == "ibkr"
 
 
-def test_on_price_bar_writes_to_store(mock_connection, mock_event_bus, mock_data_store):
+def test_collector_publish_market_bars(mock_connection, mock_event_bus, mock_data_store):
     from src.collectors.ibkr.collector import IBKRCollector
     from src.models import PriceBar
 
@@ -117,113 +117,80 @@ def test_on_price_bar_writes_to_store(mock_connection, mock_event_bus, mock_data
         connection=mock_connection,
         event_bus=mock_event_bus,
         data_store=mock_data_store,
-        watchlist=["AAPL"],
     )
 
-    bar = PriceBar(
-        symbol="AAPL",
-        date=datetime(2026, 1, 5),
-        open=150.0,
-        high=152.0,
-        low=149.0,
-        close=151.0,
-        volume=1000000,
-    )
+    bars = [
+        PriceBar(
+            symbol="SPY",
+            date=datetime(2026, 1, 5),
+            open=500.0,
+            high=505.0,
+            low=498.0,
+            close=503.0,
+            volume=50000000,
+        )
+    ]
 
-    collector._on_price_bar(bar)
+    collector._publish_market_bars(bars)
 
-    mock_data_store.write_bars.assert_called_once_with("AAPL", [bar])
+    mock_event_bus.publish.assert_called_once()
+    event = mock_event_bus.publish.call_args[0][0]
+    assert event.type == "market_bar"
+    assert event.symbol == "SPY"
+    assert event.source == "ibkr"
 
 
-def test_on_fundamental_data_publishes_event(mock_connection, mock_event_bus, mock_data_store):
+def test_collector_publish_fundamental_data(mock_connection, mock_event_bus, mock_data_store):
     from src.collectors.ibkr.collector import IBKRCollector
-    from src.models import FundamentalData
 
     collector = IBKRCollector(
         connection=mock_connection,
         event_bus=mock_event_bus,
         data_store=mock_data_store,
-        watchlist=["AAPL"],
     )
 
-    data = FundamentalData(
-        symbol="AAPL",
-        timestamp=datetime.now(),
-        company_name="Apple Inc",
-        cik="0000320193",
-        employees=166000,
-        shares_outstanding=14776353000.0,
-        float_shares=14525947723.0,
-        industry="Technology",
-        category=None,
-        subcategory=None,
-        raw_xml="<test/>",
-    )
+    details = {
+        "company_name": "Apple Inc",
+        "industry": "Technology",
+        "category": "Consumer Electronics",
+        "subcategory": "Smartphones",
+    }
 
-    collector._on_fundamental_data(data)
+    collector._publish_fundamental_data("AAPL", details)
 
     mock_event_bus.publish.assert_called_once()
     event = mock_event_bus.publish.call_args[0][0]
     assert event.type == "fundamental_data"
     assert event.symbol == "AAPL"
+    assert event.source == "ibkr"
+    assert event.payload["company_name"] == "Apple Inc"
+    assert event.payload["industry"] == "Technology"
 
 
-def test_on_fundamental_data_writes_to_store(mock_connection, mock_event_bus, mock_data_store):
+@pytest.mark.asyncio
+async def test_collector_rate_limit(mock_connection, mock_event_bus, mock_data_store):
     from src.collectors.ibkr.collector import IBKRCollector
-    from src.models import FundamentalData
+    import time
 
     collector = IBKRCollector(
         connection=mock_connection,
         event_bus=mock_event_bus,
         data_store=mock_data_store,
-        watchlist=["AAPL"],
     )
 
-    data = FundamentalData(
-        symbol="AAPL",
-        timestamp=datetime.now(),
-        company_name="Apple Inc",
-        cik="0000320193",
-        employees=166000,
-        shares_outstanding=14776353000.0,
-        float_shares=14525947723.0,
-        industry="Technology",
-        category=None,
-        subcategory=None,
-        raw_xml="<test/>",
-    )
+    # First request should not wait
+    start = time.time()
+    await collector._rate_limit()
+    first_elapsed = time.time() - start
 
-    collector._on_fundamental_data(data)
+    # Second request should wait (at least partially)
+    start = time.time()
+    await collector._rate_limit()
+    second_elapsed = time.time() - start
 
-    mock_data_store.write_fundamental.assert_called_once_with("AAPL", data)
+    # First request should be fast
+    assert first_elapsed < 0.02
 
-
-def test_add_to_watchlist(mock_connection, mock_event_bus, mock_data_store):
-    from src.collectors.ibkr.collector import IBKRCollector
-
-    collector = IBKRCollector(
-        connection=mock_connection,
-        event_bus=mock_event_bus,
-        data_store=mock_data_store,
-        watchlist=["AAPL"],
-    )
-
-    collector.add_symbol("MSFT")
-
-    assert "MSFT" in collector.watchlist
-
-
-def test_remove_from_watchlist(mock_connection, mock_event_bus, mock_data_store):
-    from src.collectors.ibkr.collector import IBKRCollector
-
-    collector = IBKRCollector(
-        connection=mock_connection,
-        event_bus=mock_event_bus,
-        data_store=mock_data_store,
-        watchlist=["AAPL", "MSFT"],
-    )
-
-    collector.remove_symbol("MSFT")
-
-    assert "MSFT" not in collector.watchlist
-    assert "AAPL" in collector.watchlist
+    # Second request should have some delay (0.05s interval)
+    # Allow some tolerance for timing
+    assert second_elapsed >= 0.03 or first_elapsed + second_elapsed >= 0.05

@@ -36,7 +36,8 @@ class DataStoreConfig:
 class CollectorConfig:
     """Collector configuration."""
 
-    watchlist: list[str]
+    market_symbol: str = "SPY"
+    scan_interval_hours: float = 24.0
     fundamental_refresh_hours: int = 24
 
 
@@ -115,7 +116,8 @@ def load_config(path: str) -> Config:
     # Parse collector config
     coll_raw = raw["collector"]
     collector = CollectorConfig(
-        watchlist=coll_raw.get("watchlist", []),
+        market_symbol=coll_raw.get("market_symbol", "SPY"),
+        scan_interval_hours=coll_raw.get("scan_interval_hours", 24.0),
         fundamental_refresh_hours=coll_raw.get("fundamental_refresh_hours", 24),
     )
 
@@ -140,7 +142,7 @@ def load_config(path: str) -> Config:
 
     logger.info(f"Loaded configuration from {path}")
     logger.debug(f"IBKR: {ibkr.host}:{ibkr.port}")
-    logger.debug(f"Watchlist: {collector.watchlist}")
+    logger.debug(f"Collector: market={collector.market_symbol}, scan_interval={collector.scan_interval_hours}h")
     logger.debug(f"Strategies: {[s.name for s in strategies]}")
 
     return config

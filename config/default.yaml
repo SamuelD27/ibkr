@@ -11,16 +11,44 @@ data_store:
   path: "./data"
 
 collector:
-  watchlist:
-    - "AAPL"
-    - "MSFT"
-    - "GOOGL"
+  # Collector now scans full S&P 500 dynamically (no hardcoded watchlist)
+  market_symbol: "SPY"           # Market benchmark for beta calculation
+  scan_interval_hours: 24        # Hours between full universe scans
   fundamental_refresh_hours: 24
 
 strategies:
   - name: "example_value"
     class_path: "src.strategies.example_value.ExampleValueStrategy"
     allocated_capital: 10000
-    enabled: true
+    enabled: false
     params:
       min_market_cap: 1000000000  # 1B minimum market cap
+
+  - name: "capm_value"
+    class_path: "src.strategies.capm_value.CAPMValueStrategy"
+    allocated_capital: 100000  # 100,000 SGD fund allocation
+    enabled: true
+    params:
+      # Universe filtering
+      min_market_cap: 500000000    # 500M minimum market cap
+      min_history_days: 252        # 1 year of trading history required
+      excluded_sectors: []         # No sector exclusions
+
+      # Beta calculation
+      beta_lookback_days: 252      # 1 year lookback for beta
+      min_beta: 0.2                # Minimum beta (exclude very low-vol stocks)
+      max_beta: 2.5                # Maximum beta (exclude very high-vol stocks)
+
+      # CAPM parameters
+      risk_free_rate: 0.05         # 5% risk-free rate (T-bills)
+      expected_market_return: 0.10 # 10% expected market return
+
+      # Decision thresholds
+      buy_alpha_threshold: 0.02    # Buy when alpha > 2%
+      exit_alpha_threshold: -0.02  # Exit when alpha < -2%
+      min_sharpe_for_buy: 0.5      # Minimum Sharpe ratio for buy signals
+      max_position_weight: 0.10    # Max 10% per position
+
+      # Data settings
+      price_history_days: 300      # Days of price history to maintain
+      market_symbol: "SPY"         # S&P 500 as market benchmark

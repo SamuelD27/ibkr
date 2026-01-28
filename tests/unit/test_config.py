@@ -15,9 +15,8 @@ data_store:
   path: "./data"
 
 collector:
-  watchlist:
-    - "AAPL"
-    - "MSFT"
+  market_symbol: "SPY"
+  scan_interval_hours: 24
   fundamental_refresh_hours: 24
 
 strategies:
@@ -40,7 +39,7 @@ data_store:
   path: "./data"
 
 collector:
-  watchlist: []
+  market_symbol: "SPY"
 
 strategies: []
 """
@@ -82,7 +81,8 @@ def test_config_collector():
 
         config = load_config(f.name)
 
-    assert config.collector.watchlist == ["AAPL", "MSFT"]
+    assert config.collector.market_symbol == "SPY"
+    assert config.collector.scan_interval_hours == 24
     assert config.collector.fundamental_refresh_hours == 24
 
 
@@ -159,7 +159,7 @@ data_store:
   path: "./data"
 
 collector:
-  watchlist: []
+  market_symbol: "SPY"
 
 strategies:
   - name: "disabled_strategy"
@@ -192,7 +192,7 @@ data_store:
   path: "./data"
 
 collector:
-  watchlist: []
+  market_symbol: "SPY"
 
 strategies:
   - name: "enabled_strategy"
